@@ -1,0 +1,37 @@
+[
+  {
+    "source_text": "set deviceconfig system service disable-ssh no",
+    "field": "management.ssh.enabled",
+    "value": true
+  },
+  {
+    "source_text": "set deviceconfig system service disable-telnet yes",
+    "field": "management.telnet.enabled",
+    "value": false
+  },
+  {
+    "source_text": "set deviceconfig system service disable-telnet no",
+    "field": "management.telnet.enabled",
+    "value": true
+  },
+  {
+    "source_text": "set deviceconfig system service disable-http yes",
+    "field": "management.http.enabled",
+    "value": false
+  },
+  {
+    "source_text": "set deviceconfig system service disable-http no",
+    "field": "management.http.enabled",
+    "value": true
+  },
+  {
+    "source_text": "set shared log-settings syslog",
+    "field": "logging.enabled",
+    "value": true
+  },
+  {
+    "source_text": "set deviceconfig system login-lockout failed-attempts 3",
+    "field": "authentication.login_protection.enabled",
+    "value": true
+  }
+]

@@ -1,0 +1,42 @@
+[
+  {
+    "source_text": "set system services ssh protocol-version v2",
+    "field": "management.ssh.version",
+    "value": 2
+  },
+  {
+    "source_text": "set system services ssh",
+    "field": "management.ssh.enabled",
+    "value": true
+  },
+  {
+    "source_text": "set system services telnet",
+    "field": "management.telnet.enabled",
+    "value": true
+  },
+  {
+    "source_text": "delete system services telnet",
+    "field": "management.telnet.enabled",
+    "value": false
+  },
+  {
+    "source_text": "set system services web-management http",
+    "field": "management.http.enabled",
+    "value": true
+  },
+  {
+    "source_text": "delete system services web-management http",
+    "field": "management.http.enabled",
+    "value": false
+  },
+  {
+    "source_text": "set system login retry-options tries-before-lockout 3",
+    "field": "authentication.login_protection.enabled",
+    "value": true
+  },
+  {
+    "source_text": "set system syslog host 10.10.40.50 any notice",
+    "field": "logging.enabled",
+    "value": true
+  }
+]

@@ -1,0 +1,42 @@
+[
+  {
+    "vendor": "paloalto",
+    "platform": "panos",
+    "control_id": "MGMT-HTTP-001",
+    "command": "set deviceconfig system service disable-http yes",
+    "description": "Disable insecure HTTP administrative management on PAN-OS.",
+    "requires_change_window": true
+  },
+  {
+    "vendor": "paloalto",
+    "platform": "panos",
+    "control_id": "MGMT-TELNET-001",
+    "command": "set deviceconfig system service disable-telnet yes",
+    "description": "Disable insecure Telnet administrative service on PAN-OS.",
+    "requires_change_window": true
+  },
+  {
+    "vendor": "paloalto",
+    "platform": "panos",
+    "control_id": "MGMT-SSH-001",
+    "command": "set deviceconfig system service disable-ssh no",
+    "description": "Enable secure SSHv2 administration on PAN-OS.",
+    "requires_change_window": false
+  },
+  {
+    "vendor": "paloalto",
+    "platform": "panos",
+    "control_id": "AUTH-LOGIN-001",
+    "command": "set deviceconfig system login-lockout failed-attempts 3 lockout-time 15",
+    "description": "Enable admin lockout policy after failed login attempts.",
+    "requires_change_window": false
+  },
+  {
+    "vendor": "paloalto",
+    "platform": "panos",
+    "control_id": "LOG-001",
+    "command": "set shared log-settings syslog SYSLOG-SERVER server 10.10.40.50 facility LOG_USER port 514",
+    "description": "Enable remote syslog server logging in PAN-OS.",
+    "requires_change_window": false
+  }
+]

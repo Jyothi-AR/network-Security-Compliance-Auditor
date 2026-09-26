@@ -1,0 +1,42 @@
+[
+  {
+    "vendor": "juniper",
+    "platform": "junos",
+    "control_id": "MGMT-HTTP-001",
+    "command": "delete system services web-management http",
+    "description": "Disable insecure cleartext HTTP web management on JunOS.",
+    "requires_change_window": true
+  },
+  {
+    "vendor": "juniper",
+    "platform": "junos",
+    "control_id": "MGMT-TELNET-001",
+    "command": "delete system services telnet",
+    "description": "Disable insecure cleartext Telnet management on JunOS.",
+    "requires_change_window": true
+  },
+  {
+    "vendor": "juniper",
+    "platform": "junos",
+    "control_id": "MGMT-SSH-001",
+    "command": "set system services ssh protocol-version v2",
+    "description": "Enforce SSH protocol version 2 on JunOS.",
+    "requires_change_window": true
+  },
+  {
+    "vendor": "juniper",
+    "platform": "junos",
+    "control_id": "AUTH-LOGIN-001",
+    "command": "set system login retry-options tries-before-lockout 3 backoff-threshold 1 backoff-factor 5 lockout-period 15",
+    "description": "Configure login retry lockout protection on JunOS.",
+    "requires_change_window": false
+  },
+  {
+    "vendor": "juniper",
+    "platform": "junos",
+    "control_id": "LOG-001",
+    "command": "set system syslog host 10.10.40.50 any notice",
+    "description": "Enable remote syslog forwarding on JunOS.",
+    "requires_change_window": false
+  }
+]

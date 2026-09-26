@@ -1,0 +1,42 @@
+[
+  {
+    "vendor": "cisco",
+    "platform": "ios",
+    "control_id": "MGMT-HTTP-001",
+    "command": "no ip http server",
+    "description": "Disable insecure HTTP management.",
+    "requires_change_window": true
+  },
+  {
+    "vendor": "cisco",
+    "platform": "ios",
+    "control_id": "MGMT-TELNET-001",
+    "command": "transport input ssh",
+    "description": "Restrict VTY access to SSH and disable Telnet.",
+    "requires_change_window": true
+  },
+  {
+    "vendor": "cisco",
+    "platform": "ios",
+    "control_id": "MGMT-SSH-001",
+    "command": "ip ssh version 2",
+    "description": "Enable SSH version 2 for secure management.",
+    "requires_change_window": true
+  },
+  {
+    "vendor": "cisco",
+    "platform": "ios",
+    "control_id": "AUTH-LOGIN-001",
+    "command": "login block-for 120 attempts 3 within 60",
+    "description": "Enable login failure rate limiting and protection.",
+    "requires_change_window": false
+  },
+  {
+    "vendor": "cisco",
+    "platform": "ios",
+    "control_id": "LOG-001",
+    "command": "logging buffered 64000 informational",
+    "description": "Enable centralized and buffered system logging.",
+    "requires_change_window": false
+  }
+]
