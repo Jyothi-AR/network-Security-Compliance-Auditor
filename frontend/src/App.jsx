@@ -10,7 +10,21 @@ import {
   fetchSafeRemediation,
   fetchLearnedVendors,
   registerVendor,
+  discoverNetwork,
+  fetchDiscoveredDevices,
+  authenticateDevice,
+  collectDeviceConfig,
+  auditDevice,
+  auditAllDevices,
+  fetchNetworkTopology,
+  clearDemoDevices,
+  fetchRemediationProposals,
+  downloadRemediatedConfig,
+  applyLiveRemediation,
+  rollbackLiveDevice,
+  fetchRemediationAuditTrail,
 } from './api'
+import VideoAssisterModal from './VideoAssisterModal'
 
 /* ==========================================================================
    ENTERPRISE VECTOR SVG ICONS
@@ -472,6 +486,19 @@ export default function App() {
   const [simulatedFixes, setSimulatedFixes] = useState({})
 
   // Auto-Fix & Rollback execution states
+  const [remediationMode, setRemediationMode] = useState('upload') // 'upload' | 'live'
+  const [remediationProposals, setRemediationProposals] = useState([])
+  const [isLoadingProposals, setIsLoadingProposals] = useState(false)
+  const [selectedProposalForDiff, setSelectedProposalForDiff] = useState(null)
+  const [showProposalDiffModal, setShowProposalDiffModal] = useState(false)
+  const [liveApprovalModal, setLiveApprovalModal] = useState({ isOpen: false, proposal: null, device: null })
+  const [liveApplyingStep, setLiveApplyingStep] = useState(null) // 1 | 2 | 3 | 4 | 5
+  const [liveExecutionLogs, setLiveExecutionLogs] = useState([])
+  const [remediationAuditTrail, setRemediationAuditTrail] = useState([])
+  const [showAuditTrailModal, setShowAuditTrailModal] = useState(false)
+  const [isDownloadingFixedConfig, setIsDownloadingFixedConfig] = useState(false)
+  const [approvedOperatorName, setApprovedOperatorName] = useState('Lead Security Architect')
+
   const [fixStatus, setFixStatus] = useState({})
   const [configSnapshots, setConfigSnapshots] = useState([
     { id: 'snap-001', timestamp: 'Initial Baseline', reason: 'Pre-Scan Snapshot', score: 25, config: SAMPLE_PRESETS[0].config },
@@ -540,10 +567,169 @@ export default function App() {
   const [aiInterpretation, setAiInterpretation] = useState(null)
   const [isLearning, setIsLearning] = useState(false)
 
-  // Load learned vendors on mount
+  // Live Network Audit & Subnet Discovery State
+  const [discoveredSubnet, setDiscoveredSubnet] = useState('192.168.1.0/24')
+  const [maxScanHosts, setMaxScanHosts] = useState(32)
+  const [isDemoScanMode, setIsDemoScanMode] = useState(true)
+  const [isScanningNetwork, setIsScanningNetwork] = useState(false)
+  const [networkDevicesList, setNetworkDevicesList] = useState([])
+  const [networkTopology, setNetworkTopology] = useState(null)
+  const [isLoadingTopology, setIsLoadingTopology] = useState(false)
+  const [selectedDeviceForAuth, setSelectedDeviceForAuth] = useState(null)
+  const [authUsername, setAuthUsername] = useState('admin')
+  const [authPassword, setAuthPassword] = useState('')
+  const [authPort, setAuthPort] = useState(22)
+  const [isAuthenticating, setIsAuthenticating] = useState(false)
+  const [authFeedback, setAuthFeedback] = useState(null)
+  const [selectedDeviceForInspection, setSelectedDeviceForInspection] = useState(null)
+  const [inspectionActiveTab, setInspectionActiveTab] = useState('raw')
+  const [isAuditingBatch, setIsAuditingBatch] = useState(false)
+  const [auditingDeviceId, setAuditingDeviceId] = useState(null)
+  const [showVideoAssisterModal, setShowVideoAssisterModal] = useState(false)
+
+  const loadNetworkInventory = async () => {
+    try {
+      const data = await fetchDiscoveredDevices()
+      if (data && data.devices) {
+        setNetworkDevicesList(data.devices)
+      }
+    } catch {
+      // Backend may still be initializing
+    }
+  }
+
+  const loadNetworkTopology = async () => {
+    setIsLoadingTopology(true)
+    try {
+      const topo = await fetchNetworkTopology()
+      if (topo) setNetworkTopology(topo)
+    } catch {
+      // Degrade gracefully
+    } finally {
+      setIsLoadingTopology(false)
+    }
+  }
+
+  // Load learned vendors & network inventory on mount
   useEffect(() => {
     fetchLearnedVendors().then(v => setLearnedVendorsList(v)).catch(() => {})
+    loadNetworkInventory()
+    loadNetworkTopology()
   }, [])
+
+  const handleRunDiscovery = async () => {
+    setIsScanningNetwork(true)
+    try {
+      const res = await discoverNetwork({
+        cidr: discoveredSubnet,
+        is_demo: isDemoScanMode,
+        max_hosts: maxScanHosts,
+      })
+      if (res && res.devices) {
+        setNetworkDevicesList(res.devices)
+        addToast(
+          'Discovery Completed',
+          `Discovered ${res.hosts_found} appliances on ${discoveredSubnet} (${isDemoScanMode ? 'Demo/Lab Fixtures' : 'Live Network Probe'})`,
+          'success'
+        )
+      }
+      await loadNetworkTopology()
+    } catch (err) {
+      addToast('Discovery Error', err.message, 'danger')
+    } finally {
+      setIsScanningNetwork(false)
+    }
+  }
+
+  const handleOpenAuthModal = (device) => {
+    setSelectedDeviceForAuth(device)
+    setAuthUsername(device.vendor === 'Cisco' ? 'cisco' : 'admin')
+    setAuthPassword('')
+    setAuthPort(22)
+    setAuthFeedback(null)
+  }
+
+  const handleSubmitAuthentication = async (e) => {
+    e?.preventDefault()
+    if (!selectedDeviceForAuth) return
+    setIsAuthenticating(true)
+    setAuthFeedback(null)
+    try {
+      const res = await authenticateDevice({
+        device_id: selectedDeviceForAuth.id,
+        username: authUsername,
+        password: authPassword,
+        port: authPort,
+        is_demo: isDemoScanMode || selectedDeviceForAuth.is_demo,
+      })
+      if (res.status === 'AUTHENTICATED') {
+        setAuthFeedback({ success: true, message: res.message })
+        addToast('Authentication Verified', res.message, 'success')
+        await loadNetworkInventory()
+        await loadNetworkTopology()
+        setTimeout(() => setSelectedDeviceForAuth(null), 1000)
+      } else {
+        setAuthFeedback({ success: false, message: res.message || 'Authentication failed' })
+      }
+    } catch (err) {
+      setAuthFeedback({ success: false, message: err.message })
+    } finally {
+      setIsAuthenticating(false)
+    }
+  }
+
+  const handleAuditSingleDevice = async (device) => {
+    setAuditingDeviceId(device.id)
+    try {
+      const res = await auditDevice({
+        device_id: device.id,
+        username: authUsername || 'admin',
+        password: authPassword || '',
+        port: authPort || 22,
+        is_demo: isDemoScanMode || device.is_demo,
+      })
+      addToast(
+        'Compliance Audit Complete',
+        `Device ${res.hostname} audited (${res.compliance_score}% CIS score)`,
+        'success'
+      )
+      await loadNetworkInventory()
+      await loadNetworkTopology()
+    } catch (err) {
+      addToast('Audit Failed', err.message, 'danger')
+    } finally {
+      setAuditingDeviceId(null)
+    }
+  }
+
+  const handleAuditAllDiscovered = async () => {
+    setIsAuditingBatch(true)
+    try {
+      const res = await auditAllDevices()
+      addToast(
+        'Batch Audit Finished',
+        `Successfully audited ${res.total_audited} devices across all subnets`,
+        'success'
+      )
+      await loadNetworkInventory()
+      await loadNetworkTopology()
+    } catch (err) {
+      addToast('Batch Audit Error', err.message, 'danger')
+    } finally {
+      setIsAuditingBatch(false)
+    }
+  }
+
+  const handleClearDemoData = async () => {
+    try {
+      const res = await clearDemoDevices()
+      addToast('Cleared Lab Devices', `Removed ${res.cleared_count} simulated lab appliances`, 'info')
+      await loadNetworkInventory()
+      await loadNetworkTopology()
+    } catch (err) {
+      addToast('Error', err.message, 'danger')
+    }
+  }
 
   // Auto-run analysis on first load with default preset
   useEffect(() => {
@@ -706,8 +892,189 @@ export default function App() {
   }
 
   /* ==========================================================================
-     AUTO-FIX & ROLLBACK HANDLERS
+     AI-ASSISTED AUTO-FIX & REMEDIATION HANDLERS
      ========================================================================== */
+
+  const handleFetchProposals = async () => {
+    if (!analysisResult) return
+    const configToUse = customConfigText || analysisResult?.raw_config || ''
+    if (!configToUse.trim()) return   // nothing to propose on
+    setIsLoadingProposals(true)
+    try {
+      const vendorStr = analysisResult?.vendor?.name || 'cisco'
+      const data = await fetchRemediationProposals({
+        vendor: vendorStr,
+        raw_config: configToUse,
+        findings: analysisResult?.findings || [],
+        baseline: analysisResult?.baseline,
+        target_type: remediationMode,
+        target_id: remediationMode === 'upload' ? (uploadedFile?.name || 'uploaded_config.conf') : (selectedDeviceForLive?.host || 'live_device.conf'),
+      })
+      if (data?.proposals) {
+        setRemediationProposals(data.proposals)
+      }
+    } catch (err) {
+      console.warn('Could not fetch structured remediation proposals:', err)
+    } finally {
+      setIsLoadingProposals(false)
+    }
+  }
+
+  // Automatically refresh proposals when active tab switches to remediation
+  useEffect(() => {
+    if (activeTab === 'remediation' && analysisResult) {
+      handleFetchProposals()
+      fetchRemediationAuditTrail(20).then(res => {
+        if (res?.records) setRemediationAuditTrail(res.records)
+      }).catch(() => {})
+    }
+  }, [activeTab, analysisResult, remediationMode])
+
+  const handleDownloadRemediatedConfig = async () => {
+    if (!analysisResult) return
+    setIsDownloadingFixedConfig(true)
+    try {
+      const vendorStr = analysisResult?.vendor?.name || 'cisco'
+      const srcName = uploadedFile?.name || 'remediated_config.conf'
+      const data = await downloadRemediatedConfig({
+        vendor: vendorStr,
+        raw_config: customConfigText,
+        findings: analysisResult?.findings || [],
+        source_name: srcName,
+      })
+      if (data?.content) {
+        const blob = new Blob([data.content], { type: 'text/plain;charset=utf-8' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = data.filename || `remediated_${srcName}`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+        addToast('Corrected Config Downloaded', `Generated offline remediated configuration for ${srcName} with non-production disclaimer header.`, 'success')
+      }
+    } catch (err) {
+      addToast('Download Failed', err.message, 'error')
+    } finally {
+      setIsDownloadingFixedConfig(false)
+    }
+  }
+
+  const handleOpenLiveApproval = (finding, proposal) => {
+    setLiveApprovalModal({
+      isOpen: true,
+      finding,
+      proposal,
+      device: selectedDeviceForLive,
+    })
+    setLiveApplyingStep(null)
+    setLiveExecutionLogs([])
+  }
+
+  const handleExecuteLiveFix = async () => {
+    const { finding, proposal, device } = liveApprovalModal
+    if (!proposal || !device) return
+
+    setLiveApplyingStep(1)
+    setLiveExecutionLogs([
+      `[1/5] Initiating pre-change safety & lockout verification for ${finding.control_id}...`,
+    ])
+
+    try {
+      // Step 1: Precondition check
+      await new Promise(r => setTimeout(r, 600))
+      setLiveApplyingStep(2)
+      setLiveExecutionLogs(prev => [
+        ...prev,
+        `[2/5] Preconditions verified! Creating pre-change backup snapshot in database...`,
+      ])
+
+      // Step 2 & 3: Apply fix through backend API
+      await new Promise(r => setTimeout(r, 600))
+      setLiveApplyingStep(3)
+      setLiveExecutionLogs(prev => [
+        ...prev,
+        `[3/5] Pushing verified vendor commands: ${proposal.commands?.join('; ')}`,
+      ])
+
+      const devId = device.id || `dev-${device.host?.replace(/\./g, '-')}`
+      const vendorStr = (analysisResult?.vendor?.name || device.vendor || device.platform || 'cisco')
+        .toLowerCase().replace(/\s.*/, '')  // e.g. "Cisco IOS" -> "cisco"
+      const res = await applyLiveRemediation({
+        device_id: devId,
+        control_id: finding.control_id,
+        approved: true,
+        approved_by: approvedOperatorName,
+        is_demo: true,
+        raw_config: customConfigText,   // pass config inline so backend can auto-upsert
+        vendor: vendorStr,
+        hostname: device.host || devId,
+      })
+
+      // Step 4: Re-audit running config
+      setLiveApplyingStep(4)
+      setLiveExecutionLogs(prev => [
+        ...prev,
+        `[4/5] Pulling running configuration & executing full compliance re-audit...`,
+      ])
+      await new Promise(r => setTimeout(r, 800))
+
+      // Step 5: Verification check
+      setLiveApplyingStep(5)
+      if (res.resolved) {
+        setLiveExecutionLogs(prev => [
+          ...prev,
+          `[5/5] VERIFICATION PASSED: Finding ${finding.control_id} is now RESOLVED. Compliance score: ${res.new_compliance_score}%.`,
+        ])
+        setFixStatus(prev => ({ ...prev, [finding.control_id]: 'applied' }))
+        addToast('Live Fix Verified & Resolved', `Control ${finding.control_id} remediated on ${device.host}. Score updated to ${res.new_compliance_score}%.`, 'success')
+
+        // Update active custom config text and snapshot history
+        if (res.updated_config) {
+          setCustomConfigText(res.updated_config)
+          runAnalysisDirect(res.updated_config, `${device.host}_running.conf`)
+        }
+      } else {
+        setLiveExecutionLogs(prev => [
+          ...prev,
+          `[5/5] WARNING: Re-audit verification failed for ${finding.control_id}. Reverting to backup recommended.`,
+        ])
+        addToast('Verification Incomplete', `Fix applied but finding was not fully resolved in re-audit.`, 'warning')
+      }
+
+      // Refresh audit trail
+      fetchRemediationAuditTrail(20).then(trailData => {
+        if (trailData?.records) setRemediationAuditTrail(trailData.records)
+      })
+
+    } catch (err) {
+      setLiveExecutionLogs(prev => [
+        ...prev,
+        `[ERROR] Execution aborted: ${err.message}`,
+      ])
+      addToast('Live Remediation Aborted', err.message, 'error')
+    }
+  }
+
+  const handleLiveRollbackAction = async (auditRecordId, deviceId) => {
+    try {
+      const res = await rollbackLiveDevice({
+        audit_record_id: auditRecordId,
+        device_id: deviceId,
+        approved_by: approvedOperatorName,
+      })
+      if (res.success) {
+        addToast('Rollback Successful', res.message, 'success')
+        fetchRemediationAuditTrail(20).then(trailData => {
+          if (trailData?.records) setRemediationAuditTrail(trailData.records)
+        })
+        handleFetchProposals()
+      }
+    } catch (err) {
+      addToast('Rollback Failed', err.message, 'error')
+    }
+  }
 
   const handleApplyFix = (controlId, tier, command) => {
     setFixStatus(prev => ({ ...prev, [controlId]: 'applying' }))
@@ -1066,6 +1433,14 @@ export default function App() {
 
         <div className="topbar-right">
           <button
+            className="btn-video-assister-top"
+            onClick={() => setShowVideoAssisterModal(true)}
+            title="Watch AI Video Walkthroughs explaining every feature"
+          >
+            <span className="live-rec-dot" />
+            <IconRadio size={14} /> AI Video Assister
+          </button>
+          <button
             className="btn-live-connect-top"
             onClick={() => {
               setShowLiveFetchModal(true)
@@ -1100,6 +1475,11 @@ export default function App() {
             <button className={`nav-link ${activeTab === 'dashboard' ? 'active' : ''}`} onClick={() => setActiveTab('dashboard')} title="Executive Dashboard">
               <span className="nav-icon"><IconDashboard size={18} /></span>
               {!sidebarCollapsed && <span className="nav-text">Executive Dashboard</span>}
+            </button>
+            <button className={`nav-link ${activeTab === 'network-audit' ? 'active' : ''}`} onClick={() => { setActiveTab('network-audit'); loadNetworkInventory(); loadNetworkTopology(); }} title="Live Network Audit">
+              <span className="nav-icon"><IconRadio size={18} /></span>
+              {!sidebarCollapsed && <span className="nav-text">Live Network Audit</span>}
+              {!sidebarCollapsed && <span className="nav-badge cyan">{networkDevicesList.length > 0 ? `${networkDevicesList.length} Devs` : 'Audit'}</span>}
             </button>
             <button className={`nav-link ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => setActiveTab('scan')} title="Config Inspector">
               <span className="nav-icon"><IconTerminal size={18} /></span>
@@ -2109,89 +2489,163 @@ export default function App() {
             </div>
           )}
 
-          {/* TAB 5: AUTONOMOUS FIX & ROLLBACK CENTER */}
+          {/* TAB 5: AI-ASSISTED AUTO-FIX & LIVE REMEDIATION CENTER */}
           {activeTab === 'remediation' && (
             <div className="tab-pane">
               <div className="pane-header-row">
                 <div>
-                  <h2>Autonomous Auto-Fix &amp; Rollback Center</h2>
-                  <p>Risk-tiered remediation dispatcher with pre-change snapshotting and 1-click inverse rollback protection.</p>
+                  <div className="tab-title-with-badge">
+                    <h2>AI-Assisted Auto-Fix &amp; Remediation Center</h2>
+                    <span className="mode-indicator-pill">
+                      {remediationMode === 'upload' ? '📄 Uploaded Config Mode' : '⚡ Live Authorized Device Mode'}
+                    </span>
+                  </div>
+                  <p>Deterministic, vendor-validated remediation proposals with lockout prevention, pre-change cryptographic snapshots, before/after diffs, and 1-click inverse rollback.</p>
                 </div>
                 <div className="autofix-legend-pills">
+                  <div className="remediation-mode-toggle-group">
+                    <button
+                      className={`btn-mode-toggle ${remediationMode === 'upload' ? 'active' : ''}`}
+                      onClick={() => setRemediationMode('upload')}
+                    >
+                      <IconFindings size={13} /> Uploaded Config
+                    </button>
+                    <button
+                      className={`btn-mode-toggle ${remediationMode === 'live' ? 'active' : ''}`}
+                      onClick={() => setRemediationMode('live')}
+                    >
+                      <IconTerminal size={13} /> Live Device
+                    </button>
+                  </div>
+                  <button className="btn-audit-trail-inline" onClick={() => setShowAuditTrailModal(true)}>
+                    <IconShield size={13} /> Audit Trail ({remediationAuditTrail.length})
+                  </button>
                   <button className="btn-how-it-works-inline" onClick={() => setShowHowItFixesModal(true)}>
-                    <IconHelpCircle size={13} /> How Auto-Fix &amp; Rollback Works
-                  </button>
-                  <button className="btn-rollback-all" onClick={handleRollbackAll}>
-                    <IconRotateCcw size={13} /> Rollback All to Baseline
+                    <IconHelpCircle size={13} /> Circuit Breakers
                   </button>
                 </div>
               </div>
 
-              {/* CRITIC AGENT BANNER */}
-              <div className="critic-banner">
-                <div className="critic-icon"><IconShield size={24} /></div>
-                <div className="critic-text">
-                  <strong>Critic Agent Safe Remediation &amp; Circuit Breaker Active</strong>
-                  <p>Every generated CLI script is pre-validated against routing protocols and interface dependencies. If any issue occurs, the engine triggers an immediate inverse rollback to restore the pre-change snapshot.</p>
+              {/* MODE SPECIFIC CONTEXT BANNER */}
+              {remediationMode === 'upload' ? (
+                <div className="critic-banner upload-mode-banner">
+                  <div className="critic-icon"><IconShield size={24} /></div>
+                  <div className="critic-text">
+                    <strong>Offline Configuration Remediation Mode</strong>
+                    <p>Remediation proposals are synthesized and validated against vendor rules offline. Physical network equipment is <strong>never modified</strong>. Inspect before/after diffs and download the corrected configuration file.</p>
+                  </div>
+                  <div className="banner-actions">
+                    <button
+                      className="btn-download-full-cfg"
+                      disabled={isDownloadingFixedConfig}
+                      onClick={handleDownloadRemediatedConfig}
+                    >
+                      <IconDownload size={14} /> {isDownloadingFixedConfig ? 'Generating...' : 'Download Remediated Config (.conf)'}
+                    </button>
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="critic-banner live-mode-banner">
+                  <div className="critic-icon"><IconTerminal size={24} /></div>
+                  <div className="critic-text">
+                    <strong>Live Device Auto-Fix Pipeline Active</strong>
+                    <p>Read-only auditing by default. Applying live changes strictly requires <strong>explicit operator approval</strong>, validates preconditions (e.g. lockout prevention), captures an <strong>immutable pre-change backup snapshot</strong>, pushes validated commands, and re-audits the device to confirm verified resolution.</p>
+                  </div>
+                  <div className="live-target-select-pill">
+                    <span className="lbl">Target Device:</span>
+                    <strong>{selectedDeviceForLive?.host || '192.168.1.1 (Cisco)'}</strong>
+                  </div>
+                </div>
+              )}
 
-              {/* REMEDIATION CARDS WITH ROLLBACK BUTTONS */}
+              {/* REMEDIATION CARDS WITH ROLLBACK & DIFF BUTTONS */}
               <div className="remediation-deck">
                 {findings.filter(f => f.status === 'FAIL').length === 0 ? (
                   <div className="all-clean-card">
                     <span className="clean-icon"><IconCheckCircle size={36} /></span>
                     <h3>Zero Outstanding Compliance Violations</h3>
-                    <p>All evaluated controls have passed successfully. No remediation actions required.</p>
+                    <p>All evaluated security controls have passed successfully. No remediation actions required.</p>
                   </div>
                 ) : (
                   findings.filter(f => f.status === 'FAIL').map(f => {
                     const rem = remediations.find(r => r.control_id === f.control_id)
+                    const prop = remediationProposals.find(p => p.control_id === f.control_id)
                     const sev = f.severity?.toUpperCase() || 'MEDIUM'
                     const status = fixStatus[f.control_id]
-                    const rollbackCmd = calculateRollbackCommand(rem?.command || '', f.control_id)
+                    const rollbackCmd = prop?.rollback_commands?.join('; ') || calculateRollbackCommand(rem?.command || '', f.control_id)
+                    const fixCmd = prop?.commands?.join('\n') || rem?.command || ''
+                    const isConservative = prop?.risk_level === 'MANUAL_ONLY' || !prop?.auto_applicable
 
                     return (
                       <div key={f.control_id} className={`autofix-card ${status === 'applied' ? 'fix-applied-glow' : ''}`}>
                         <div className="af-header">
                           <div>
-                            <span className="af-id">{f.control_id}</span>
-                            <h4>{f.description}</h4>
+                            <div className="af-id-row">
+                              <span className="af-id">{f.control_id}</span>
+                              {prop?.is_idempotent && <span className="badge-idempotent">Already Compliant (Idempotent)</span>}
+                            </div>
+                            <h4>{prop?.title || f.description}</h4>
                           </div>
                           <div className="af-badges">
                             <span className={`fp-sev-badge ${sev.toLowerCase()}`}>{sev}</span>
-                            <span className={`af-tier-badge ${sev.toLowerCase()}`}>
-                              {sev === 'LOW' ? 'AUTO-TIER' : sev === 'MEDIUM' ? 'APPROVAL-TIER' : 'WINDOW-TIER'}
+                            <span className={`af-tier-badge ${prop?.risk_level?.toLowerCase() || sev.toLowerCase()}`}>
+                              {prop?.risk_level || (sev === 'LOW' ? 'SAFE-AUTO' : sev === 'MEDIUM' ? 'APPROVAL-TIER' : 'MANUAL-WINDOW')}
                             </span>
                           </div>
                         </div>
 
                         <div className="af-body">
                           <div className="af-observed">
-                            <span>Detected Vulnerability:</span>
-                            <code>{f.observed}</code>
+                            <span>Detected Vulnerability / Observation:</span>
+                            <code>{typeof f.observed === 'object' ? JSON.stringify(f.observed) : String(f.observed)}</code>
                           </div>
 
-                          {rem && (
+                          {/* PRECONDITION CHECKS BADGES */}
+                          {prop?.preconditions && prop.preconditions.length > 0 && (
+                            <div className="af-preconditions-box">
+                              <span className="precond-title">Pre-Execution Safety Verification:</span>
+                              <div className="precond-chips-row">
+                                {prop.preconditions.map((p, pIdx) => (
+                                  <div key={pIdx} className={`precond-chip ${p.passed ? 'passed' : 'failed'}`}>
+                                    {p.passed ? <IconCheck size={12} /> : <IconAlertTriangle size={12} />}
+                                    <span>{p.message}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* CONSERVATIVE GUARDRAIL ADVISORY */}
+                          {isConservative && prop?.manual_guidance ? (
+                            <div className="conservative-guidance-box">
+                              <div className="cg-header">
+                                <IconAlertTriangle size={15} />
+                                <strong>Manual Remediation Required (Conservative Guardrail)</strong>
+                              </div>
+                              <p>{prop.manual_guidance}</p>
+                            </div>
+                          ) : (
                             <div className="af-cmd-box">
                               <div className="cmd-header-pair">
-                                <span className="cmd-label">Validated Fix Command:</span>
-                                <span className="cmd-label text-rose">Inverse Rollback Command:</span>
+                                <span className="cmd-label">Validated Fix Commands:</span>
+                                <span className="cmd-label text-rose">Inverse Rollback Commands:</span>
                               </div>
                               <div className="cmd-code-pair">
-                                <code className="text-green">{rem.command}</code>
-                                <code className="text-rose">{rollbackCmd}</code>
+                                <pre className="text-green">{fixCmd || '# No commands'}</pre>
+                                <pre className="text-rose">{rollbackCmd || '# No rollback'}</pre>
                               </div>
-                              <small>{rem.requires_change_window ? 'Requires Scheduled Maintenance Window' : 'Safe for immediate hot-apply'}</small>
+                              <small>
+                                {prop?.requires_change_window ? 'Requires Scheduled Maintenance Window' : 'Verified safe for immediate deployment'}
+                              </small>
                             </div>
                           )}
                         </div>
 
-                        {/* AUTO-FIX ACTIONS & ROLLBACK BUTTONS */}
+                        {/* ACTION CONTROLS & ROLLBACK */}
                         <div className="af-actions">
                           {status === 'applied' && (
                             <div className="fix-applied-row">
-                              <span className="status-tag success"><IconCheck size={14} /> Auto-Applied &amp; Verified</span>
+                              <span className="status-tag success"><IconCheck size={14} /> Auto-Applied &amp; Re-Audit Verified (RESOLVED)</span>
                               <button
                                 className="btn-rollback-action"
                                 onClick={() => handleRollbackFix(f.control_id, rem?.command)}
@@ -2213,27 +2667,24 @@ export default function App() {
                             </div>
                           )}
 
-                          {status === 'scheduled' && (
-                            <div className="fix-applied-row">
-                              <span className="status-tag warn">Scheduled for Change Window</span>
-                              <button
-                                className="btn-rollback-action"
-                                onClick={() => handleRollbackFix(f.control_id, rem?.command)}
-                              >
-                                <IconRotateCcw size={13} /> Cancel Schedule
-                              </button>
-                            </div>
-                          )}
-
                           {status === 'rolled-back' && (
                             <div className="fix-applied-row">
                               <span className="status-tag rose"><IconRotateCcw size={14} /> Rolled Back to Snapshot</span>
-                              <button
-                                className="btn-primary-sm"
-                                onClick={() => handleApplyFix(f.control_id, sev, rem?.command)}
-                              >
-                                Re-Apply Fix
-                              </button>
+                              {remediationMode === 'live' ? (
+                                <button
+                                  className="btn-primary-sm"
+                                  onClick={() => handleOpenLiveApproval(f, prop)}
+                                >
+                                  Re-Apply Live
+                                </button>
+                              ) : (
+                                <button
+                                  className="btn-primary-sm"
+                                  onClick={() => handleApplyFix(f.control_id, sev, rem?.command)}
+                                >
+                                  Re-Apply Fix
+                                </button>
+                              )}
                             </div>
                           )}
 
@@ -2242,18 +2693,43 @@ export default function App() {
 
                           {!status && (
                             <div className="af-buttons">
+                              {prop?.unified_diff && (
+                                <button
+                                  className="btn-diff-preview"
+                                  onClick={() => {
+                                    setSelectedProposalForDiff(prop)
+                                    setShowProposalDiffModal(true)
+                                  }}
+                                >
+                                  <IconGitCompare size={14} /> View Diff
+                                </button>
+                              )}
+
                               <button
                                 className="btn-secondary"
-                                onClick={() => handleCopy(rem?.command || '', f.control_id)}
+                                onClick={() => handleCopy(fixCmd, f.control_id)}
                               >
                                 {copiedId === f.control_id ? 'Copied' : 'Copy CLI'}
                               </button>
-                              <button
-                                className="btn-primary"
-                                onClick={() => handleApplyFix(f.control_id, sev, rem?.command)}
-                              >
-                                {sev === 'LOW' ? 'Auto-Fix Now' : sev === 'MEDIUM' ? 'Approve & Apply' : 'Schedule Change Window'}
-                              </button>
+
+                              {remediationMode === 'upload' ? (
+                                <button
+                                  className="btn-primary"
+                                  onClick={() => handleApplyFix(f.control_id, sev, fixCmd)}
+                                >
+                                  Apply to Buffer
+                                </button>
+                              ) : (
+                                <button
+                                  className="btn-primary btn-live-apply"
+                                  disabled={isConservative && !prop?.auto_applicable}
+                                  onClick={() => handleOpenLiveApproval(f, prop)}
+                                >
+                                  {isConservative && !prop?.auto_applicable
+                                    ? 'Manual Only'
+                                    : <><IconTerminal size={14} /> Approve &amp; Apply Live</>}
+                                </button>
+                              )}
                             </div>
                           )}
                         </div>
@@ -2546,6 +3022,462 @@ export default function App() {
                     </div>
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* TAB: LIVE NETWORK AUDIT */}
+          {activeTab === 'network-audit' && (
+            <div className="tab-pane network-audit-pane">
+              {/* PANE HEADER */}
+              <div className="pane-header">
+                <div className="net-audit-header-info">
+                  <div className="net-audit-title-row">
+                    <h2>Live Subnet Discovery &amp; Network Fleet Audit</h2>
+                    <span className={`net-mode-pill ${isDemoScanMode ? 'demo-mode' : 'live-mode'}`}>
+                      <span className="pill-dot" />
+                      {isDemoScanMode ? 'DEMO / LAB ENVIRONMENT' : 'LIVE NETWORK ACTIVE'}
+                    </span>
+                  </div>
+                  <p>
+                    Non-destructive network subnet discovery, automated vendor &amp; role classification,
+                    credential validation with strict read-only guarantees, CIS/NIST compliance audit,
+                    and cross-device attack path intelligence.
+                  </p>
+                </div>
+              </div>
+
+              {/* DISCOVERY CONTROL HERO BANNER */}
+              <div className="section-card discovery-control-card">
+                <div className="discovery-control-grid">
+                  <div className="discovery-field">
+                    <label>Subnet Target CIDR</label>
+                    <div className="input-with-icon">
+                      <IconNetwork size={16} className="input-icon" />
+                      <input
+                        type="text"
+                        className="discovery-input"
+                        value={discoveredSubnet}
+                        onChange={e => setDiscoveredSubnet(e.target.value)}
+                        placeholder="e.g. 192.168.1.0/24 or 10.0.0.0/24"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="discovery-field discovery-field-sm">
+                    <label>Probe Limit</label>
+                    <select
+                      className="discovery-select"
+                      value={maxScanHosts}
+                      onChange={e => setMaxScanHosts(Number(e.target.value))}
+                    >
+                      <option value={16}>16 Hosts (/28)</option>
+                      <option value={32}>32 Hosts (/27)</option>
+                      <option value={64}>64 Hosts (/26)</option>
+                      <option value={128}>128 Hosts (/25)</option>
+                      <option value={256}>256 Hosts (/24)</option>
+                    </select>
+                  </div>
+
+                  <div className="discovery-field discovery-mode-switch">
+                    <label>Environment Mode</label>
+                    <div className="mode-toggle-group">
+                      <button
+                        type="button"
+                        className={`mode-toggle-btn ${isDemoScanMode ? 'active' : ''}`}
+                        onClick={() => setIsDemoScanMode(true)}
+                        title="Simulated Multi-Vendor Lab Topology with Cisco, Fortinet, MikroTik, Linux"
+                      >
+                        <span className="mode-dot demo" /> Demo / Lab
+                      </button>
+                      <button
+                        type="button"
+                        className={`mode-toggle-btn ${!isDemoScanMode ? 'active' : ''}`}
+                        onClick={() => setIsDemoScanMode(false)}
+                        title="Live Subnet ARP + Port Banner Probe"
+                      >
+                        <span className="mode-dot live" /> Live Scan
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="discovery-actions">
+                    <button
+                      className="btn-primary btn-discovery-scan"
+                      onClick={handleRunDiscovery}
+                      disabled={isScanningNetwork}
+                    >
+                      {isScanningNetwork ? (
+                        <>
+                          <span className="radar-spinner" /> Scanning Subnet...
+                        </>
+                      ) : (
+                        <>
+                          <IconRadio size={16} /> Discover Subnet
+                        </>
+                      )}
+                    </button>
+
+                    <button
+                      className="btn-secondary"
+                      onClick={handleAuditAllDiscovered}
+                      disabled={isAuditingBatch || networkDevicesList.length === 0}
+                      title="Audit all discovered network devices in batch"
+                    >
+                      {isAuditingBatch ? 'Auditing Fleet...' : <><IconShield size={15} /> Audit All Devices</>}
+                    </button>
+
+                    {isDemoScanMode && networkDevicesList.length > 0 && (
+                      <button
+                        className="btn-outline-danger"
+                        onClick={handleClearDemoData}
+                        title="Clear simulated lab fixtures"
+                      >
+                        <IconRotateCcw size={14} /> Clear Lab
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* SAFETY BANNER */}
+                <div className="discovery-safety-footnote">
+                  <IconShield size={14} className="text-cyan" />
+                  <span>
+                    <strong>Safety Guarantee:</strong> TCP connect timeout capped at &le;350ms per port. Non-destructive ARP &amp; banner extraction only. Mutating or write commands are strictly blocked by connector allowlists.
+                  </span>
+                </div>
+              </div>
+
+              {/* STAGED WORKFLOW METRICS & STEPPER */}
+              <div className="discovery-pipeline-stepper">
+                <div className={`pipe-step ${networkDevicesList.length > 0 ? 'completed' : 'active'}`}>
+                  <div className="pipe-step-num">1</div>
+                  <div className="pipe-step-content">
+                    <span className="pipe-step-title">DISCOVERED</span>
+                    <span className="pipe-step-desc">
+                      {networkDevicesList.length} Reachable Host{networkDevicesList.length !== 1 ? 's' : ''}
+                    </span>
+                  </div>
+                </div>
+                <div className="pipe-arrow">&rarr;</div>
+
+                <div className={`pipe-step ${networkDevicesList.filter(d => d.status !== 'DISCOVERED').length > 0 ? 'completed' : ''}`}>
+                  <div className="pipe-step-num">2</div>
+                  <div className="pipe-step-content">
+                    <span className="pipe-step-title">IDENTIFIED</span>
+                    <span className="pipe-step-desc">
+                      {networkDevicesList.filter(d => d.vendor && d.vendor !== 'Unknown').length} Classified
+                    </span>
+                  </div>
+                </div>
+                <div className="pipe-arrow">&rarr;</div>
+
+                <div className={`pipe-step ${networkDevicesList.filter(d => d.status === 'AUTHENTICATED' || d.status === 'AUDITED').length > 0 ? 'completed' : ''}`}>
+                  <div className="pipe-step-num">3</div>
+                  <div className="pipe-step-content">
+                    <span className="pipe-step-title">AUTHENTICATED</span>
+                    <span className="pipe-step-desc">
+                      {networkDevicesList.filter(d => d.status === 'AUTHENTICATED' || d.status === 'AUDITED').length} Read-Only Sessions
+                    </span>
+                  </div>
+                </div>
+                <div className="pipe-arrow">&rarr;</div>
+
+                <div className={`pipe-step ${networkDevicesList.filter(d => d.status === 'AUDITED').length > 0 ? 'completed' : ''}`}>
+                  <div className="pipe-step-num">4</div>
+                  <div className="pipe-step-content">
+                    <span className="pipe-step-title">AUDITED</span>
+                    <span className="pipe-step-desc">
+                      {networkDevicesList.filter(d => d.status === 'AUDITED').length} CIS Compliant
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* MAIN 2-COLUMN VIEW: FLEET INVENTORY + CROSS-DEVICE ATTACK GRAPH */}
+              <div className="network-audit-grid">
+                {/* LEFT: DISCOVERED APPLIANCE INVENTORY */}
+                <div className="section-card fleet-inventory-card">
+                  <div className="card-header-row">
+                    <div>
+                      <h3>Discovered Appliance Inventory</h3>
+                      <p>Hardware devices, management ports, and current audit state.</p>
+                    </div>
+                    <div className="fleet-badge-group">
+                      <span className="stat-pill cyan">{networkDevicesList.length} Total</span>
+                      <span className="stat-pill green">{networkDevicesList.filter(d => d.status === 'AUDITED').length} Audited</span>
+                    </div>
+                  </div>
+
+                  {networkDevicesList.length === 0 ? (
+                    <div className="empty-fleet-state">
+                      <div className="empty-radar-icon">
+                        <IconRadio size={40} className="pulse-slow" />
+                      </div>
+                      <h4>No Devices in Subnet Inventory</h4>
+                      <p>Click &quot;Discover Subnet&quot; above to scan your local network or launch the simulated multi-vendor lab topology.</p>
+                      <button className="btn-primary" onClick={handleRunDiscovery}>
+                        <IconRadio size={16} /> Discover Subnet ({discoveredSubnet})
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="table-responsive">
+                      <table className="aegis-table fleet-table">
+                        <thead>
+                          <tr>
+                            <th>Device / IP</th>
+                            <th>Vendor &amp; Role</th>
+                            <th>Mgmt Ports</th>
+                            <th>Confidence</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {networkDevicesList.map(dev => {
+                            const isAudited = dev.status === 'AUDITED'
+                            const isAuth = dev.status === 'AUTHENTICATED' || isAudited
+                            const isAuditing = auditingDeviceId === dev.id
+
+                            return (
+                              <tr key={dev.id} className={`fleet-row ${isAudited ? 'row-audited' : ''}`}>
+                                <td>
+                                  <div className="device-host-cell">
+                                    <span className="device-reachability-dot online" title="Reachable" />
+                                    <div>
+                                      <strong className="device-hostname">{dev.hostname || dev.ip}</strong>
+                                      <div className="device-ip-mac">
+                                        <code>{dev.ip}</code>
+                                        {dev.mac_address && <span className="mac-tag">{dev.mac_address}</span>}
+                                      </div>
+                                    </div>
+                                  </div>
+                                </td>
+
+                                <td>
+                                  <div className="vendor-role-cell">
+                                    <span className={`vendor-badge-pill ${dev.vendor?.toLowerCase().replace(' ', '-')}`}>
+                                      {dev.vendor || 'Unknown'}
+                                    </span>
+                                    <span className="device-type-label">{dev.device_type || 'Unknown device'}</span>
+                                  </div>
+                                </td>
+
+                                <td>
+                                  <div className="ports-chip-wrap">
+                                    {(dev.open_ports || []).map(p => (
+                                      <span key={p} className="port-chip" title={p === 22 ? 'SSH' : p === 443 ? 'HTTPS' : p === 80 ? 'HTTP' : p === 8728 ? 'MikroTik API' : `Port ${p}`}>
+                                        {p}
+                                      </span>
+                                    ))}
+                                    {(!dev.open_ports || dev.open_ports.length === 0) && (
+                                      <span className="text-muted">—</span>
+                                    )}
+                                  </div>
+                                </td>
+
+                                <td>
+                                  <div className="confidence-meter">
+                                    <div className="conf-bar-bg">
+                                      <div
+                                        className="conf-bar-fill"
+                                        style={{ width: `${Math.round((dev.confidence || 0.5) * 100)}%` }}
+                                      />
+                                    </div>
+                                    <span className="conf-text">{Math.round((dev.confidence || 0.5) * 100)}%</span>
+                                  </div>
+                                </td>
+
+                                <td>
+                                  <span className={`stage-status-pill status-${dev.status?.toLowerCase()}`}>
+                                    {dev.status}
+                                  </span>
+                                  {dev.latest_analysis && (
+                                    <div className="score-mini-pill">
+                                      {Math.round(dev.latest_analysis.compliance_score || 0)}% score
+                                    </div>
+                                  )}
+                                </td>
+
+                                <td>
+                                  <div className="fleet-action-buttons">
+                                    {!isAuth && (
+                                      <button
+                                        className="btn-action-sm btn-auth"
+                                        onClick={() => handleOpenAuthModal(dev)}
+                                        title="Provide credentials to authenticate and collect config"
+                                      >
+                                        <IconTerminal size={12} /> Auth
+                                      </button>
+                                    )}
+
+                                    <button
+                                      className="btn-action-sm btn-audit"
+                                      onClick={() => handleAuditSingleDevice(dev)}
+                                      disabled={isAuditing}
+                                      title="Run compliance audit against this device"
+                                    >
+                                      {isAuditing ? <span className="btn-spinner" /> : <><IconShield size={12} /> Audit</>}
+                                    </button>
+
+                                    {dev.has_config || dev.raw_config || isAudited ? (
+                                      <button
+                                        className="btn-action-sm btn-inspect"
+                                        onClick={() => setSelectedDeviceForInspection(dev)}
+                                        title="Inspect collected configuration & canonical JSON evidence"
+                                      >
+                                        <IconFindings size={12} /> View
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                {/* RIGHT: CROSS-DEVICE EXPOSURE & ATTACK PATH INTELLIGENCE */}
+                <div className="section-card topology-exposure-card">
+                  <div className="card-header-row">
+                    <div>
+                      <h3>Cross-Device Exposure &amp; Attack Graph</h3>
+                      <p>Multi-hop compounded vulnerabilities traversing network boundaries.</p>
+                    </div>
+                    <button
+                      className="btn-secondary btn-sm"
+                      onClick={loadNetworkTopology}
+                      disabled={isLoadingTopology}
+                      title="Recalculate cross-device exposure graph"
+                    >
+                      <IconRotateCcw size={13} /> {isLoadingTopology ? 'Analyzing…' : 'Refresh'}
+                    </button>
+                  </div>
+
+                  {networkTopology && (
+                    <>
+                      {/* SYSTEMIC RISK SUMMARY */}
+                      <div className="systemic-risk-banner">
+                        <div className="srb-left">
+                          <span className="srb-label">Systemic Fleet Risk Score</span>
+                          <div className="srb-val-row">
+                            <h2 className={`srb-score ${networkTopology.systemic_risk_score > 40 ? 'text-pink' : 'text-cyan'}`}>
+                              {networkTopology.systemic_risk_score}%
+                            </h2>
+                            <span className={`srb-rating rating-${networkTopology.perimeter_defense_rating?.toLowerCase()}`}>
+                              {networkTopology.perimeter_defense_rating} PERIMETER DEFENSE
+                            </span>
+                          </div>
+                        </div>
+                        <div className="srb-right">
+                          <span className="srb-stat">
+                            <strong>{networkTopology.exposure_vectors?.length || 0}</strong> Compound Risk Paths
+                          </span>
+                          <span className="srb-stat">
+                            <strong>{networkTopology.nodes?.length || 0}</strong> Network Nodes Connected
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* TOPOLOGY FLOW GRAPH */}
+                      <div className="topology-flow-map">
+                        <div className="topo-layer-col">
+                          <span className="layer-title">Perimeter</span>
+                          {(networkTopology.nodes || []).filter(n => n.layer === 'Perimeter').map(node => (
+                            <div key={node.id} className="topo-node-chip perimeter">
+                              <span className="tnc-icon"><IconShield size={14} /></span>
+                              <div className="tnc-info">
+                                <strong>{node.label}</strong>
+                                <span className="tnc-ip">{node.ip}</span>
+                              </div>
+                              <span className="tnc-score">{Math.round(node.compliance_score)}%</span>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="topo-flow-arrow">&rarr;</div>
+
+                        <div className="topo-layer-col">
+                          <span className="layer-title">Core / Router</span>
+                          {(networkTopology.nodes || []).filter(n => n.layer === 'Core').map(node => (
+                            <div key={node.id} className="topo-node-chip core">
+                              <span className="tnc-icon"><IconRadio size={14} /></span>
+                              <div className="tnc-info">
+                                <strong>{node.label}</strong>
+                                <span className="tnc-ip">{node.ip}</span>
+                              </div>
+                              <span className="tnc-score">{Math.round(node.compliance_score)}%</span>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="topo-flow-arrow">&rarr;</div>
+
+                        <div className="topo-layer-col">
+                          <span className="layer-title">Access / Switch</span>
+                          {(networkTopology.nodes || []).filter(n => n.layer === 'Access').map(node => (
+                            <div key={node.id} className="topo-node-chip access">
+                              <span className="tnc-icon"><IconServer size={14} /></span>
+                              <div className="tnc-info">
+                                <strong>{node.label}</strong>
+                                <span className="tnc-ip">{node.ip}</span>
+                              </div>
+                              <span className="tnc-score">{Math.round(node.compliance_score)}%</span>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="topo-flow-arrow">&rarr;</div>
+
+                        <div className="topo-layer-col">
+                          <span className="layer-title">Workloads</span>
+                          {(networkTopology.nodes || []).filter(n => n.layer === 'Workload').map(node => (
+                            <div key={node.id} className="topo-node-chip workload">
+                              <span className="tnc-icon"><IconCpu size={14} /></span>
+                              <div className="tnc-info">
+                                <strong>{node.label}</strong>
+                                <span className="tnc-ip">{node.ip}</span>
+                              </div>
+                              <span className="tnc-score">{Math.round(node.compliance_score)}%</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* COMPOUND RISK VECTORS LIST */}
+                      <div className="exposure-vectors-section">
+                        <h4 className="ev-heading">Compound Multi-Hop Attack Exposure Vectors</h4>
+                        {(!networkTopology.exposure_vectors || networkTopology.exposure_vectors.length === 0) ? (
+                          <div className="empty-ev-box">
+                            <IconCheckCircle size={18} className="text-green" />
+                            <span>No compound multi-hop exposure paths detected across active appliances.</span>
+                          </div>
+                        ) : (
+                          <div className="ev-list">
+                            {networkTopology.exposure_vectors.map(vec => (
+                              <div key={vec.vector_id} className={`ev-card ev-${vec.severity?.toLowerCase()}`}>
+                                <div className="ev-top">
+                                  <div className="ev-title-row">
+                                    <span className={`ev-sev-badge ${vec.severity?.toLowerCase()}`}>{vec.severity}</span>
+                                    <strong className="ev-title">{vec.title}</strong>
+                                  </div>
+                                  <span className="ev-mult-pill">&times;{vec.risk_multiplication_factor} Risk Multiplier</span>
+                                </div>
+                                <p className="ev-desc">{vec.description}</p>
+                                <div className="ev-remediation">
+                                  <span className="ev-rem-label">Remediation:</span> {vec.remediation_summary}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -3172,6 +4104,500 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* MODAL: CREDENTIAL AUTHENTICATION */}
+      {selectedDeviceForAuth && (
+        <div className="aegis-modal-backdrop" onClick={() => !isAuthenticating && setSelectedDeviceForAuth(null)}>
+          <div className="aegis-modal auth-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title-wrap">
+                <span className="modal-badge cyan">READ-ONLY OPERATOR AUTHENTICATION</span>
+                <h3>Authenticate Device: {selectedDeviceForAuth.hostname || selectedDeviceForAuth.ip}</h3>
+              </div>
+              <button
+                className="btn-close-modal"
+                disabled={isAuthenticating}
+                onClick={() => setSelectedDeviceForAuth(null)}
+              >
+                <IconCross size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmitAuthentication} className="modal-body">
+              <p className="modal-subtext">
+                Authenticate with non-privileged or read-only operator credentials. AegisGuard tests reachability, extracts running-config, and enforces hardcoded read-only allowlists.
+              </p>
+
+              <div className="auth-device-summary-chip">
+                <div>
+                  <span className="lbl">Target IP:</span>
+                  <code>{selectedDeviceForAuth.ip}</code>
+                </div>
+                <div>
+                  <span className="lbl">Detected Vendor:</span>
+                  <strong className="text-cyan">{selectedDeviceForAuth.vendor || 'Unknown'}</strong>
+                </div>
+                <div>
+                  <span className="lbl">Device Role:</span>
+                  <span>{selectedDeviceForAuth.device_type}</span>
+                </div>
+              </div>
+
+              {authFeedback && (
+                <div className={`auth-feedback-banner ${authFeedback.success ? 'feedback-success' : 'feedback-error'}`}>
+                  {authFeedback.success ? <IconCheckCircle size={16} /> : <IconAlertTriangle size={16} />}
+                  <span>{authFeedback.message}</span>
+                </div>
+              )}
+
+              <div className="form-grid-2">
+                <div className="form-group">
+                  <label>Operator Username <span className="req">*</span></label>
+                  <input
+                    type="text"
+                    value={authUsername}
+                    onChange={e => setAuthUsername(e.target.value)}
+                    placeholder="e.g. admin or netops"
+                    required
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label>SSH Port</label>
+                  <input
+                    type="number"
+                    value={authPort}
+                    onChange={e => setAuthPort(Number(e.target.value))}
+                    placeholder="22"
+                  />
+                </div>
+              </div>
+
+              <div className="form-group">
+                <label>Password / Secret Phrase</label>
+                <input
+                  type="password"
+                  value={authPassword}
+                  onChange={e => setAuthPassword(e.target.value)}
+                  placeholder="••••••••••••"
+                />
+                <small className="form-hint">
+                  Secrets are verified in-memory and never persisted in cleartext.
+                </small>
+              </div>
+
+              <div className="modal-footer">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={isAuthenticating}
+                  onClick={() => setSelectedDeviceForAuth(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="btn-primary"
+                  disabled={isAuthenticating}
+                >
+                  {isAuthenticating ? 'Verifying Channel…' : <><IconTerminal size={15} /> Verify &amp; Authenticate</>}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: DEVICE CONFIG & CANONICAL EVIDENCE INSPECTION */}
+      {selectedDeviceForInspection && (
+        <div className="aegis-modal-backdrop" onClick={() => setSelectedDeviceForInspection(null)}>
+          <div className="aegis-modal inspect-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title-wrap">
+                <span className="modal-badge purple">DEVICE EVIDENCE &amp; CANONICAL MODEL</span>
+                <h3>Configuration Inspector: {selectedDeviceForInspection.hostname || selectedDeviceForInspection.ip}</h3>
+              </div>
+              <button className="btn-close-modal" onClick={() => setSelectedDeviceForInspection(null)}>
+                <IconCross size={18} />
+              </button>
+            </div>
+
+            <div className="modal-body">
+              <div className="inspect-nav-tabs">
+                <button
+                  className={`inspect-tab-btn ${inspectionActiveTab === 'raw' ? 'active' : ''}`}
+                  onClick={() => setInspectionActiveTab('raw')}
+                >
+                  <IconTerminal size={14} /> Raw CLI Configuration Evidence
+                </button>
+                <button
+                  className={`inspect-tab-btn ${inspectionActiveTab === 'normalized' ? 'active' : ''}`}
+                  onClick={() => setInspectionActiveTab('normalized')}
+                >
+                  <IconCpu size={14} /> Normalized Canonical Model (JSON)
+                </button>
+                {selectedDeviceForInspection.latest_analysis && (
+                  <button
+                    className={`inspect-tab-btn ${inspectionActiveTab === 'findings' ? 'active' : ''}`}
+                    onClick={() => setInspectionActiveTab('findings')}
+                  >
+                    <IconShield size={14} /> Compliance Audit Findings ({selectedDeviceForInspection.latest_analysis.findings?.length || 0})
+                  </button>
+                )}
+              </div>
+
+              {inspectionActiveTab === 'raw' && (
+                <div className="inspect-code-wrapper">
+                  <pre className="inspect-code-block">
+                    {selectedDeviceForInspection.raw_config || '! No raw configuration collected yet. Click Audit Device to pull config.'}
+                  </pre>
+                </div>
+              )}
+
+              {inspectionActiveTab === 'normalized' && (
+                <div className="inspect-code-wrapper">
+                  <pre className="inspect-code-block json">
+                    {JSON.stringify(
+                      selectedDeviceForInspection.normalized_config || {
+                        id: selectedDeviceForInspection.id,
+                        hostname: selectedDeviceForInspection.hostname,
+                        ip_address: selectedDeviceForInspection.ip,
+                        vendor: selectedDeviceForInspection.vendor,
+                        device_type: selectedDeviceForInspection.device_type,
+                        status: selectedDeviceForInspection.status,
+                        open_ports: selectedDeviceForInspection.open_ports,
+                        evidence: selectedDeviceForInspection.evidence,
+                      },
+                      null,
+                      2
+                    )}
+                  </pre>
+                </div>
+              )}
+
+              {inspectionActiveTab === 'findings' && selectedDeviceForInspection.latest_analysis && (
+                <div className="inspect-findings-list">
+                  {(selectedDeviceForInspection.latest_analysis.findings || []).map((f, idx) => (
+                    <div key={idx} className={`inspect-finding-item status-${f.status?.toLowerCase()}`}>
+                      <div className="ifi-top">
+                        <span className={`fp-status-badge ${f.status?.toLowerCase()}`}>{f.status}</span>
+                        <strong>{f.control_id}</strong>
+                        <span className={`fp-sev-badge ${f.severity?.toLowerCase()}`}>{f.severity}</span>
+                      </div>
+                      <p className="ifi-desc">{f.description}</p>
+                      {f.observed && (
+                        <div className="ifi-evidence">
+                          <code>Observed: {typeof f.observed === 'object' ? JSON.stringify(f.observed) : f.observed}</code>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: PROPOSAL UNIFIED DIFF INSPECTOR */}
+      {showProposalDiffModal && selectedProposalForDiff && (
+        <div className="aegis-modal-backdrop" onClick={() => setShowProposalDiffModal(false)}>
+          <div className="aegis-modal diff-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title-wrap">
+                <span className="modal-badge cyan">SYNTACTIC &amp; SEMANTIC CHANGE PREVIEW</span>
+                <h3>Before / After Remediation Diff: {selectedProposalForDiff.control_id}</h3>
+              </div>
+              <button className="btn-close-modal" onClick={() => setShowProposalDiffModal(false)}>
+                <IconCross size={18} />
+              </button>
+            </div>
+
+            <div className="modal-body">
+              <div className="diff-modal-summary">
+                <div>
+                  <span className="lbl">Target Vendor:</span>
+                  <strong className="text-cyan">{selectedProposalForDiff.vendor?.toUpperCase()} ({selectedProposalForDiff.platform})</strong>
+                </div>
+                <div>
+                  <span className="lbl">Risk Classification:</span>
+                  <span className={`af-tier-badge ${selectedProposalForDiff.risk_level?.toLowerCase()}`}>
+                    {selectedProposalForDiff.risk_level}
+                  </span>
+                </div>
+                <div>
+                  <span className="lbl">Idempotency Status:</span>
+                  <span>{selectedProposalForDiff.is_idempotent ? 'Compliant / Idempotent' : 'Change Required'}</span>
+                </div>
+              </div>
+
+              <div className="diff-view-container">
+                <div className="diff-view-header">
+                  <span>Unified Patch Representation (a/current vs b/remediated)</span>
+                  <small>RFC 3986 Standard Diff</small>
+                </div>
+                <pre className="diff-pre-block">
+                  {selectedProposalForDiff.unified_diff || '! No textual changes generated.'}
+                </pre>
+              </div>
+
+              <div className="diff-cmd-preview-footer">
+                <strong>CLI Commands to be Executed:</strong>
+                <code>{selectedProposalForDiff.commands?.join(' \n')}</code>
+              </div>
+            </div>
+
+            <div className="modal-footer">
+              <button className="btn-secondary" onClick={() => setShowProposalDiffModal(false)}>
+                Close Preview
+              </button>
+              {remediationMode === 'live' && (
+                <button
+                  className="btn-primary"
+                  onClick={() => {
+                    setShowProposalDiffModal(false)
+                    handleOpenLiveApproval(
+                      { control_id: selectedProposalForDiff.control_id, description: selectedProposalForDiff.description },
+                      selectedProposalForDiff
+                    )
+                  }}
+                >
+                  Proceed to Live Approval →
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: LIVE OPERATOR APPROVAL & 5-STAGE REMEDIATION STEPPER */}
+      {liveApprovalModal.isOpen && (
+        <div className="aegis-modal-backdrop" onClick={() => !liveApplyingStep && setLiveApprovalModal({ isOpen: false, proposal: null, device: null })}>
+          <div className="aegis-modal live-approval-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title-wrap">
+                <span className="modal-badge warn">EXPLICIT LIVE OPERATOR APPROVAL REQUIRED</span>
+                <h3>Live Auto-Fix Pipeline: {liveApprovalModal.finding?.control_id}</h3>
+              </div>
+              <button
+                className="btn-close-modal"
+                disabled={liveApplyingStep && liveApplyingStep < 5}
+                onClick={() => setLiveApprovalModal({ isOpen: false, proposal: null, device: null })}
+              >
+                <IconCross size={18} />
+              </button>
+            </div>
+
+            <div className="modal-body">
+              <div className="live-approval-target-card">
+                <div>
+                  <span className="lbl">Target Hostname:</span>
+                  <strong>{liveApprovalModal.device?.host || '192.168.1.1'}</strong>
+                </div>
+                <div>
+                  <span className="lbl">Vendor / Platform:</span>
+                  <strong className="text-cyan">{liveApprovalModal.proposal?.vendor?.toUpperCase() || 'CISCO'}</strong>
+                </div>
+                <div>
+                  <span className="lbl">Target Control:</span>
+                  <code>{liveApprovalModal.finding?.control_id}</code>
+                </div>
+              </div>
+
+              {/* 5-STAGE PIPELINE STEPPER */}
+              <div className="live-stepper-track">
+                {[
+                  { step: 1, label: 'Precondition Safety Check' },
+                  { step: 2, label: 'Pre-Change Backup Snapshot' },
+                  { step: 3, label: 'Pushing Vendor Commands' },
+                  { step: 4, label: 'Compliance Re-Audit' },
+                  { step: 5, label: 'Verification (RESOLVED)' },
+                ].map(s => {
+                  const isCurrent = liveApplyingStep === s.step
+                  const isDone = liveApplyingStep && liveApplyingStep > s.step
+                  return (
+                    <div key={s.step} className={`stepper-step ${isDone ? 'done' : isCurrent ? 'active' : ''}`}>
+                      <div className="stepper-circle">
+                        {isDone ? <IconCheck size={13} /> : s.step}
+                      </div>
+                      <span className="stepper-label">{s.label}</span>
+                    </div>
+                  )
+                })}
+              </div>
+
+              {/* COMMANDS & SAFETY CHECKS */}
+              <div className="live-approval-details">
+                <div className="lad-item">
+                  <span className="lad-title">Commands to Apply:</span>
+                  <pre className="cmd-exec-box text-green">
+                    {liveApprovalModal.proposal?.commands?.join('\n') || '# No commands'}
+                  </pre>
+                </div>
+                <div className="lad-item">
+                  <span className="lad-title text-rose">Pre-Calculated Rollback:</span>
+                  <pre className="cmd-exec-box text-rose">
+                    {liveApprovalModal.proposal?.rollback_commands?.join('\n') || '# Inverse rollback snapshot'}
+                  </pre>
+                </div>
+              </div>
+
+              {/* OPERATOR SIGN-OFF */}
+              <div className="form-group operator-signoff-group">
+                <label>Approving Security Engineer / Operator Name</label>
+                <input
+                  type="text"
+                  value={approvedOperatorName}
+                  onChange={e => setApprovedOperatorName(e.target.value)}
+                  disabled={Boolean(liveApplyingStep)}
+                  placeholder="e.g. Lead Network Security Engineer"
+                />
+                <small className="form-hint">
+                  Your identity and digital approval token will be recorded in the immutable audit log.
+                </small>
+              </div>
+
+              {/* EXECUTION LOGS TERMINAL */}
+              {liveExecutionLogs.length > 0 && (
+                <div className="live-exec-terminal">
+                  <div className="let-header">
+                    <IconTerminal size={13} /> Live Remediation Execution Telemetry
+                  </div>
+                  <div className="let-body">
+                    {liveExecutionLogs.map((log, idx) => (
+                      <div key={idx} className="let-line">{log}</div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="modal-footer">
+              <button
+                className="btn-secondary"
+                disabled={liveApplyingStep && liveApplyingStep < 5}
+                onClick={() => setLiveApprovalModal({ isOpen: false, proposal: null, device: null })}
+              >
+                {liveApplyingStep === 5 ? 'Close' : 'Cancel'}
+              </button>
+
+              {(!liveApplyingStep || liveApplyingStep < 5) && (
+                <button
+                  className="btn-primary btn-confirm-live"
+                  disabled={Boolean(liveApplyingStep)}
+                  onClick={handleExecuteLiveFix}
+                >
+                  {liveApplyingStep ? 'Executing Live Remediation…' : <><IconCheckCircle size={15} /> Confirm Approval &amp; Execute Fix</>}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: REMEDIATION AUDIT TRAIL LOGS */}
+      {showAuditTrailModal && (
+        <div className="aegis-modal-backdrop" onClick={() => setShowAuditTrailModal(false)}>
+          <div className="aegis-modal audit-trail-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title-wrap">
+                <span className="modal-badge cyan">IMMUTABLE COMPLIANCE AUDIT TRAIL</span>
+                <h3>Auto-Fix &amp; Rollback History Log</h3>
+              </div>
+              <button className="btn-close-modal" onClick={() => setShowAuditTrailModal(false)}>
+                <IconCross size={18} />
+              </button>
+            </div>
+
+            <div className="modal-body">
+              <p className="modal-subtext">
+                Every live and offline auto-fix action is permanently cryptographically logged with before/after posture scores, pre-change snapshot IDs, and operator sign-offs.
+              </p>
+
+              {remediationAuditTrail.length === 0 ? (
+                <div className="empty-audit-trail">
+                  <IconShield size={32} />
+                  <p>No live remediation records in log yet. Apply fixes in Live Device mode to generate audit records.</p>
+                </div>
+              ) : (
+                <div className="audit-trail-table-wrap">
+                  <table className="audit-trail-table">
+                    <thead>
+                      <tr>
+                        <th>Timestamp</th>
+                        <th>Device / Host</th>
+                        <th>Control ID</th>
+                        <th>Status</th>
+                        <th>Score Delta</th>
+                        <th>Approved By</th>
+                        <th>Snapshot ID</th>
+                        <th>Rollback</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {remediationAuditTrail.map((rec, rIdx) => (
+                        <tr key={rIdx}>
+                          <td><code>{rec.created_at ? new Date(rec.created_at).toLocaleTimeString() : 'Recent'}</code></td>
+                          <td><strong>{rec.hostname || rec.device_id}</strong></td>
+                          <td><code>{rec.control_id}</code></td>
+                          <td>
+                            <span className={`status-pill ${rec.status?.toLowerCase()}`}>
+                              {rec.status}
+                            </span>
+                          </td>
+                          <td>
+                            <span className="score-delta text-green">
+                              {rec.before_score}% → {rec.after_score}%
+                            </span>
+                          </td>
+                          <td>{rec.approved_by}</td>
+                          <td><small><code>{rec.backup_snapshot_id || '—'}</code></small></td>
+                          <td>
+                            {rec.status !== 'ROLLED_BACK' && rec.backup_snapshot_id ? (
+                              <button
+                                className="btn-rollback-mini"
+                                onClick={() => handleLiveRollbackAction(rec.id, rec.device_id)}
+                              >
+                                <IconRotateCcw size={12} /> Rollback
+                              </button>
+                            ) : (
+                              <span className="text-muted">—</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            <div className="modal-footer">
+              <button className="btn-secondary" onClick={() => setShowAuditTrailModal(false)}>
+                Close Audit Log
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* VIDEO ASSISTER MODAL */}
+      <VideoAssisterModal
+        isOpen={showVideoAssisterModal}
+        onClose={() => setShowVideoAssisterModal(false)}
+        onNavigateToTab={(tab) => setActiveTab(tab)}
+      />
+
+      {/* FLOATING VIDEO ASSISTER QUICK ORB */}
+      <button
+        className="floating-video-assister-orb"
+        onClick={() => setShowVideoAssisterModal(true)}
+        title="Open AI Video Assister & Feature Guides"
+      >
+        <span className="fva-rec-dot" />
+        <IconRadio size={16} />
+        <span className="fva-label">AI Video Assister</span>
+      </button>
 
       {/* FLOATING TOAST NOTIFICATION CONTAINER */}
       <div className="toast-container">

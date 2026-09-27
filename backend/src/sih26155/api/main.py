@@ -8,6 +8,8 @@ from sih26155.api.routes.history import router as history_router
 from sih26155.api.routes.intelligence import router as intelligence_router
 from sih26155.api.routes.learning import router as learning_router
 from sih26155.api.routes.live import router as live_router
+from sih26155.api.routes.network_audit import router as network_audit_router
+from sih26155.api.routes.remediation import router as remediation_router
 from sih26155.api.routes.reports import router as reports_router
 
 
@@ -40,6 +42,8 @@ app.add_middleware(
 
 app.include_router(analysis_router)
 app.include_router(live_router)
+app.include_router(network_audit_router)
+app.include_router(remediation_router)
 app.include_router(intelligence_router)
 app.include_router(learning_router)
 app.include_router(history_router)
