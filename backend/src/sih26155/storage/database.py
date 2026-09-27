@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
+from dotenv import load_dotenv
 from typing import Generator
 
 from sqlalchemy import create_engine, event
@@ -21,10 +22,27 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 # ---------------------------------------------------------------------------
 # Connection URL
 # ---------------------------------------------------------------------------
+from pathlib import Path
 
-_DATABASE_URL: str = os.getenv(
-    "DATABASE_URL",
-    "sqlite:///./data/compliance.db",   # local dev fallback
+# Find the project root
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+ENV_FILE = PROJECT_ROOT / ".env"
+
+# Load the correct .env file
+load_dotenv(ENV_FILE, override=True)
+
+_DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not _DATABASE_URL:
+    raise RuntimeError(
+        f"DATABASE_URL not found in {ENV_FILE}"
+    )
+
+print("ENV FILE:", ENV_FILE)
+print("ENV EXISTS:", ENV_FILE.exists())
+print(
+    "DATABASE TYPE:",
+    _DATABASE_URL.split("://")[0]
 )
 
 # SQLite needs check_same_thread=False for FastAPI
