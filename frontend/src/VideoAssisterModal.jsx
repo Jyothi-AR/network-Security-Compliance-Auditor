@@ -473,7 +473,7 @@ export const VIDEO_CATALOG = [
     ],
   },
 ]
-
+{
     title: 'Live Subnet Discovery & Fleet Audit',
     category: 'Network Operations',
     duration: '1:15',
